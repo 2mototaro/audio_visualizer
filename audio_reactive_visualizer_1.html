@@ -1,0 +1,318 @@
+<!DOCTYPE html>
+<html lang="th">
+<head>
+<meta charset="UTF-8">
+<title>Audio Reactive Visualizer</title>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Inter:wght@400;500&display=swap');
+
+:root{
+  --bg: #0a0b0f;
+  --panel: #12141c;
+  --text: #e9e7e2;
+  --muted: #7d8290;
+  --accent: #2dd4bf;
+  --line: #232634;
+}
+
+*{box-sizing:border-box;}
+html,body{
+  margin:0; padding:0; height:100%;
+  background: var(--bg);
+  color: var(--text);
+  font-family:'Inter', sans-serif;
+  overflow:hidden;
+}
+
+.stage{
+  position:relative;
+  width:100%; height:100vh;
+  display:flex; flex-direction:column;
+  align-items:center; justify-content:center;
+}
+
+canvas{
+  display:block;
+  width:min(90vw, 640px);
+  height:min(90vw, 640px);
+  border-radius: 50%;
+}
+
+.header{
+  position:absolute; top:28px; left:0; right:0;
+  text-align:center;
+  z-index: 5;
+  pointer-events:none;
+}
+.eyebrow{
+  font-size:11px; letter-spacing:0.18em; text-transform:uppercase;
+  color: var(--muted); margin:0 0 6px;
+}
+h1{
+  font-family:'Space Grotesk', sans-serif;
+  font-weight:700; font-size:20px; margin:0;
+  letter-spacing:-0.01em;
+}
+
+.controls{
+  position:absolute; bottom:28px; left:0; right:0;
+  display:flex; flex-direction:column; align-items:center; gap:14px;
+  z-index: 5;
+}
+
+.upload-row{ display:flex; gap:10px; align-items:center; }
+
+.btn{
+  font-family:'Inter', sans-serif;
+  font-size:13px; font-weight:500;
+  padding:10px 18px;
+  border-radius:999px;
+  border:1px solid var(--line);
+  background: var(--panel);
+  color: var(--text);
+  cursor:pointer;
+  transition: border-color .15s ease, transform .1s ease;
+}
+.btn:hover{ border-color: var(--accent); }
+.btn:active{ transform: scale(0.97); }
+.btn:disabled{ opacity:0.35; cursor:not-allowed; }
+
+input[type=file]{ display:none; }
+
+.track-name{
+  font-size:12px; color: var(--muted);
+  max-width: 320px; text-overflow:ellipsis; overflow:hidden; white-space:nowrap;
+}
+
+.hint{
+  font-size:11px; color: var(--muted); text-align:center; margin-top:4px;
+}
+</style>
+</head>
+<body>
+
+<div class="stage">
+  <div class="header">
+    <p class="eyebrow">Audio Reactive Visualizer</p>
+    <h1 id="titleText">อัปโหลดเพลงเพื่อเริ่ม</h1>
+  </div>
+
+  <canvas id="canvas" width="640" height="640"></canvas>
+
+  <div class="controls">
+    <div class="upload-row">
+      <label class="btn" for="fileInput">เลือกไฟล์เพลง</label>
+      <input type="file" id="fileInput" accept="audio/*">
+      <button class="btn" id="playBtn" disabled>▶ เล่น</button>
+    </div>
+    <div class="track-name" id="trackName">ยังไม่ได้เลือกไฟล์</div>
+    <div class="hint">สีและจังหวะการเต้นของวงแหวนจะปรับตามเบส/ความถี่ของเพลงที่เล่นอยู่</div>
+  </div>
+</div>
+
+<audio id="audioEl" crossorigin="anonymous"></audio>
+
+<script>
+const fileInput = document.getElementById('fileInput');
+const playBtn = document.getElementById('playBtn');
+const audioEl = document.getElementById('audioEl');
+const canvas = document.getElementById('canvas');
+const ctx = canvas.getContext('2d');
+const trackName = document.getElementById('trackName');
+const titleText = document.getElementById('titleText');
+
+let audioCtx, analyser, source, freqData, timeData;
+let bassHistory = [];
+let hue = 190;
+let lastBeatTime = 0;
+let beatFlash = 0;
+let playing = false;
+
+// color blending wave state
+let flowPhase = 0;
+let smoothEnergy = 0;
+let baseHue = 190;
+let ripples = []; // {birth, hue}
+
+function setupAudioGraph(){
+  if (audioCtx) return;
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  source = audioCtx.createMediaElementSource(audioEl);
+  analyser = audioCtx.createAnalyser();
+  analyser.fftSize = 512;
+  freqData = new Uint8Array(analyser.frequencyBinCount);
+  timeData = new Uint8Array(analyser.fftSize);
+  source.connect(analyser);
+  analyser.connect(audioCtx.destination);
+}
+
+fileInput.addEventListener('change', (e) => {
+  const file = e.target.files[0];
+  if (!file) return;
+  const url = URL.createObjectURL(file);
+  audioEl.src = url;
+  trackName.textContent = file.name;
+  titleText.textContent = "พร้อมเล่น";
+  playBtn.disabled = false;
+  setupAudioGraph();
+});
+
+playBtn.addEventListener('click', () => {
+  if (audioCtx.state === 'suspended') audioCtx.resume();
+  if (!playing){
+    audioEl.play();
+    playBtn.textContent = '⏸ หยุด';
+    titleText.textContent = "กำลังเล่น";
+  } else {
+    audioEl.pause();
+    playBtn.textContent = '▶ เล่น';
+    titleText.textContent = "หยุดชั่วคราว";
+  }
+  playing = !playing;
+});
+
+audioEl.addEventListener('ended', () => {
+  playing = false;
+  playBtn.textContent = '▶ เล่น';
+  titleText.textContent = "เล่นจบแล้ว";
+});
+
+function averageRange(arr, start, end){
+  let sum = 0;
+  for (let i = start; i < end; i++) sum += arr[i];
+  return sum / (end - start);
+}
+
+function detectBeat(bass){
+  bassHistory.push(bass);
+  if (bassHistory.length > 40) bassHistory.shift();
+  const avg = bassHistory.reduce((a,b) => a+b, 0) / bassHistory.length;
+  const now = performance.now();
+  const isBeat = bass > avg * 1.25 && bass > 25 && (now - lastBeatTime) > 220;
+  if (isBeat){
+    lastBeatTime = now;
+    beatFlash = 1;
+    ripples.push({ birth: now, hue: baseHue });
+    if (ripples.length > 6) ripples.shift();
+  }
+  return isBeat;
+}
+
+function draw(){
+  requestAnimationFrame(draw);
+
+  const w = canvas.width, h = canvas.height;
+  const cx = w/2, cy = h/2;
+
+  ctx.fillStyle = 'rgba(10,11,15,0.35)';
+  ctx.fillRect(0,0,w,h);
+
+  if (!analyser){
+    return;
+  }
+
+  analyser.getByteFrequencyData(freqData);
+  analyser.getByteTimeDomainData(timeData);
+
+  const bass = averageRange(freqData, 0, 10);
+  const mid = averageRange(freqData, 10, 60);
+  const treble = averageRange(freqData, 60, 128);
+
+  const isBeat = detectBeat(bass);
+  beatFlash *= 0.90;
+
+  // overall energy, smoothed so color motion never jumps
+  const energy = (bass + mid + treble) / (3 * 255);
+  smoothEnergy += (energy - smoothEnergy) * 0.08;
+
+  // base hue drifts slowly and continuously with the music's energy
+  baseHue += 0.12 + smoothEnergy * 0.5;
+  baseHue = baseHue % 360;
+
+  // flow phase drives the traveling color wave around the ring
+  flowPhase += 0.006 + smoothEnergy * 0.05;
+
+  const lightness = 45 + beatFlash * 20;
+  const baseRadius = 90 + (bass/255) * 60 + beatFlash * 30;
+
+  // radial frequency bars
+  const bars = 96;
+  for (let i = 0; i < bars; i++){
+    const idx = Math.floor(i / bars * freqData.length);
+    const val = freqData[idx] / 255;
+    const angle = (i / bars) * Math.PI * 2;
+    const barLen = 20 + val * 160;
+
+    // smooth blending wave: hue drifts as a soft sine wave across the ring,
+    // traveling over time via flowPhase, instead of stepping bar-by-bar
+    const wave = Math.sin(angle * 2.5 + flowPhase) * 0.5
+               + Math.sin(angle * 4 - flowPhase * 1.6) * 0.5;
+    const localHue = (baseHue + wave * 50 + val * 25) % 360;
+    const sat = 65 + smoothEnergy * 20;
+    const light = lightness + val * 15;
+
+    const x1 = cx + Math.cos(angle) * baseRadius;
+    const y1 = cy + Math.sin(angle) * baseRadius;
+    const x2 = cx + Math.cos(angle) * (baseRadius + barLen);
+    const y2 = cy + Math.sin(angle) * (baseRadius + barLen);
+
+    ctx.strokeStyle = `hsl(${localHue}, ${sat}%, ${light}%)`;
+    ctx.lineWidth = 4;
+    ctx.lineCap = 'round';
+    ctx.beginPath();
+    ctx.moveTo(x1, y1);
+    ctx.lineTo(x2, y2);
+    ctx.stroke();
+  }
+
+  // center pulse core
+  const coreGrad = ctx.createRadialGradient(cx, cy, 0, cx, cy, baseRadius);
+  coreGrad.addColorStop(0, `hsla(${baseHue}, 80%, ${55 + beatFlash*30}%, 0.9)`);
+  coreGrad.addColorStop(1, `hsla(${baseHue}, 80%, 20%, 0)`);
+  ctx.fillStyle = coreGrad;
+  ctx.beginPath();
+  ctx.arc(cx, cy, baseRadius, 0, Math.PI*2);
+  ctx.fill();
+
+  // waveform ring
+  ctx.beginPath();
+  const waveRadius = baseRadius - 20;
+  for (let i = 0; i < timeData.length; i++){
+    const angle = (i / timeData.length) * Math.PI * 2;
+    const amp = (timeData[i] - 128) / 128;
+    const r = waveRadius + amp * 18;
+    const x = cx + Math.cos(angle) * r;
+    const y = cy + Math.sin(angle) * r;
+    if (i === 0) ctx.moveTo(x,y); else ctx.lineTo(x,y);
+  }
+  ctx.closePath();
+  ctx.strokeStyle = `hsla(${(baseHue+180)%360}, 70%, 70%, 0.7)`;
+  ctx.lineWidth = 2;
+  ctx.stroke();
+
+  // beat ripples: expanding rings of color that blend softly into
+  // whatever is already drawn, using additive ("lighter") compositing
+  ctx.save();
+  ctx.globalCompositeOperation = 'lighter';
+  const now = performance.now();
+  ripples = ripples.filter(r => (now - r.birth) < 1400);
+  for (const r of ripples){
+    const age = (now - r.birth) / 1400; // 0 -> 1
+    const radius = 40 + age * (Math.min(w,h)/2);
+    const alpha = (1 - age) * 0.35;
+    const band = ctx.createRadialGradient(cx, cy, Math.max(radius - 40, 0), cx, cy, radius);
+    band.addColorStop(0, `hsla(${r.hue}, 75%, 60%, 0)`);
+    band.addColorStop(0.7, `hsla(${r.hue}, 75%, 60%, ${alpha})`);
+    band.addColorStop(1, `hsla(${r.hue}, 75%, 60%, 0)`);
+    ctx.fillStyle = band;
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius, 0, Math.PI*2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+
+draw();
+</script>
+</body>
+</html>
